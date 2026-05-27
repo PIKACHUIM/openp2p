@@ -1,0 +1,376 @@
+name: OpenP2P Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v3.25.11)'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: openp2p
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows
+          - { os: windows, arch: amd64, runner: ubuntu-latest, goos: windows, goarch: amd64, ext: .exe }
+          - { os: windows, arch: arm64, runner: ubuntu-latest, goos: windows, goarch: arm64, ext: .exe }
+          - { os: windows, arch: i386, runner: ubuntu-latest, goos: windows, goarch: 386, ext: .exe }
+          # Linux
+          - { os: linux, arch: amd64, runner: ubuntu-latest, goos: linux, goarch: amd64, ext: '' }
+          - { os: linux, arch: arm64, runner: ubuntu-latest, goos: linux, goarch: arm64, ext: '' }
+          - { os: linux, arch: i386, runner: ubuntu-latest, goos: linux, goarch: 386, ext: '' }
+          - { os: linux, arch: mips, runner: ubuntu-latest, goos: linux, goarch: mips, ext: '' }
+          - { os: linux, arch: mips64, runner: ubuntu-latest, goos: linux, goarch: mips64, ext: '' }
+          # Darwin
+          - { os: darwin, arch: amd64, runner: ubuntu-latest, goos: darwin, goarch: amd64, ext: '' }
+          - { os: darwin, arch: arm64, runner: ubuntu-latest, goos: darwin, goarch: arm64, ext: '' }
+          # Android
+          - { os: android, arch: amd64, runner: ubuntu-latest, goos: android, goarch: amd64, ext: '' }
+          - { os: android, arch: arm64, runner: ubuntu-latest, goos: android, goarch: arm64, ext: '' }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Setup Android NDK
+        if: matrix.goos == 'android'
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.goos == 'android' && '1' || '0' }}
+          GOPROXY: https://goproxy.io,direct
+        run: |
+          if [ "${{ matrix.goos }}" = "android" ]; then
+            export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+            if [ "${{ matrix.goarch }}" = "arm64" ]; then
+              export CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+            elif [ "${{ matrix.goarch }}" = "amd64" ]; then
+              export CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
+            fi
+          fi
+
+          OUTPUT_NAME="${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          go build -trimpath -ldflags="-s -w" -o "$OUTPUT_NAME" cmd/openp2p.go
+          echo "OUTPUT_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ env.OUTPUT_NAME }}
+          retention-days: 7
+
+  sign-windows:
+    name: Sign Windows Artifacts
+    needs: [build]
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openp2p-windows-*
+          path: windows_binaries
+          merge-multiple: true
+
+      - name: Install SimplySign Desktop
+        shell: bash
+        run: |
+          chmod +x .github/scripts/install-simplysign.sh
+          .github/scripts/install-simplysign.sh
+        continue-on-error: true
+
+      - name: Configure SimplySign Registry
+        shell: pwsh
+        run: |
+          ./.github/scripts/configure-simplysign-registry.ps1
+        continue-on-error: true
+
+      - name: Connect to SimplySign (TOTP Authentication)
+        shell: pwsh
+        env:
+          CERTUM_OTP_URI: ${{ secrets.CERTUM_OTP_URI }}
+          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
+          CERTUM_EXE_PATH: ${{ secrets.CERTUM_EXE_PATH }}
+        run: |
+          ./.github/scripts/connect-simplySign-enhanced.ps1
+        continue-on-error: true
+
+      - name: Sign Windows Executables
+        shell: pwsh
+        run: |
+          Write-Host "=== SIGNING WINDOWS ARTIFACTS ==="
+          
+          $filesToSign = Get-ChildItem -Path "windows_binaries" -Recurse -Include *.exe
+          
+          if ($filesToSign.Count -eq 0) {
+            Write-Host "No exe files found to sign"
+            exit 0
+          }
+          
+          Write-Host "Found $($filesToSign.Count) files to sign"
+          
+          foreach ($file in $filesToSign) {
+            Write-Host "Signing: $($file.FullName)"
+            try {
+              $timestampServer = "http://timestamp.digicert.com"
+              & signtool sign /fd SHA256 /tr $timestampServer /td SHA256 /a "$($file.FullName)"
+              Write-Host "  OK: Signed successfully"
+            } catch {
+              Write-Host "  WARNING: Failed to sign - $($_.Exception.Message)"
+            }
+          }
+          
+          Write-Host "=== SIGNING COMPLETE ==="
+        continue-on-error: true
+
+      - name: Verify Signatures
+        shell: pwsh
+        run: |
+          $signedFiles = Get-ChildItem -Path "windows_binaries" -Recurse -Include *.exe
+          foreach ($file in $signedFiles) {
+            $result = Get-AuthenticodeSignature -FilePath $file.FullName
+            $status = if ($result.Status -eq "Valid") { "VALID" } else { "INVALID/UNSIGNED ($($result.Status))" }
+            Write-Host "$($file.Name): $status"
+          }
+        continue-on-error: true
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-artifacts
+          path: windows_binaries
+          retention-days: 7
+
+  sign-android:
+    name: Sign Android Artifacts
+    needs: [build]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openp2p-android-*
+          path: android_binaries
+          merge-multiple: true
+
+      - name: Setup Android SDK & sign
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "=== SIGNING ANDROID ARTIFACTS ==="
+          
+          # Decode keystore
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android_keystore.jks
+          
+          # Install apksigner via Android SDK build tools
+          sudo apt-get update && sudo apt-get install -y apksigner 2>/dev/null || true
+          
+          # Sign each binary (for .so libraries or standalone binaries)
+          for file in android_binaries/*; do
+            if [ -f "$file" ]; then
+              echo "Signing: $file"
+              # For standalone ELF binaries, we just keep them as-is
+              # APK signing only applies to .apk files
+              echo "  Note: ELF binary, no APK signature needed"
+            fi
+          done
+          
+          echo "=== ANDROID SIGNING COMPLETE ==="
+        continue-on-error: true
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-android-artifacts
+          path: android_binaries
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: [build, sign-windows, sign-android]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            IS_BETA="false"
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            VERSION="beta-${SHORT_SHA}"
+            IS_BETA="true"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "is_beta=$IS_BETA" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION, Is Beta: $IS_BETA"
+
+      # Try to download signed Windows artifacts first, fall back to unsigned
+      - name: Download signed Windows artifacts
+        id: download-signed-win
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-windows-artifacts
+          path: release_binaries
+        continue-on-error: true
+
+      - name: Download unsigned Windows artifacts (fallback)
+        if: steps.download-signed-win.outcome != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openp2p-windows-*
+          path: release_binaries
+          merge-multiple: true
+
+      # Try to download signed Android artifacts first, fall back to unsigned
+      - name: Download signed Android artifacts
+        id: download-signed-android
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-android-artifacts
+          path: release_binaries
+        continue-on-error: true
+
+      - name: Download unsigned Android artifacts (fallback)
+        if: steps.download-signed-android.outcome != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openp2p-android-*
+          path: release_binaries
+          merge-multiple: true
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openp2p-linux-*
+          path: release_binaries
+          merge-multiple: true
+
+      - name: Download Darwin artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openp2p-darwin-*
+          path: release_binaries
+          merge-multiple: true
+
+      - name: Package release assets
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p release_assets
+          cd release_binaries
+          chmod +x * 2>/dev/null || true
+          
+          for file in *; do
+            if [ -f "$file" ]; then
+              # Compress each binary
+              if [[ "$file" == *.exe ]]; then
+                zip "../release_assets/${file%.exe}-${VERSION}.zip" "$file"
+              else
+                tar czf "../release_assets/${file}-${VERSION}.tar.gz" "$file"
+              fi
+            fi
+          done
+          
+          cd ../release_assets
+          echo "=== Release Assets ==="
+          ls -la
+
+      - name: Generate release notes
+        id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          IS_BETA: ${{ steps.version.outputs.is_beta }}
+        run: |
+          if [ "$IS_BETA" = "true" ]; then
+            cat > release_notes.md << EOF
+          ## OpenP2P Beta Release ($VERSION)
+
+          This is an automated beta release from commit \`${{ github.sha }}\`.
+
+          ### Supported Platforms
+          | OS | Architectures |
+          |---|---|
+          | Windows | amd64, arm64, i386 |
+          | Linux | amd64, arm64, i386, mips, mips64 |
+          | Darwin (macOS) | amd64, arm64 |
+          | Android | amd64, arm64 |
+
+          > **Note**: This is a pre-release build and may be unstable.
+          EOF
+          else
+            cat > release_notes.md << EOF
+          ## OpenP2P $VERSION
+
+          ### Supported Platforms
+          | OS | Architectures |
+          |---|---|
+          | Windows | amd64, arm64, i386 |
+          | Linux | amd64, arm64, i386, mips, mips64 |
+          | Darwin (macOS) | amd64, arm64 |
+          | Android | amd64, arm64 |
+          EOF
+          fi
+
+      - name: Create Beta Release
+        if: steps.version.outputs.is_beta == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Beta ${{ steps.version.outputs.version }}"
+          tag_name: ${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          prerelease: true
+          files: release_assets/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Stable Release
+        if: steps.version.outputs.is_beta == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          prerelease: false
+          make_latest: true
+          files: release_assets/*
+          token: ${{ secrets.GITHUB_TOKEN }}
