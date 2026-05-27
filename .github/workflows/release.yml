@@ -195,6 +195,41 @@ jobs:
         run: |
           Write-Host "=== SIGNING WINDOWS ARTIFACTS WITH CERTUM CLOUD CERTIFICATE ==="
           
+          # 查找 signtool.exe 路径（Windows SDK 自带但未加入 PATH）
+          $signtoolPath = $null
+          $sdkPaths = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+            "${env:ProgramFiles}\Windows Kits\10\bin"
+          )
+          foreach ($sdkPath in $sdkPaths) {
+            if (Test-Path $sdkPath) {
+              $found = Get-ChildItem -Path $sdkPath -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+                       Where-Object { $_.FullName -like "*x64*" } |
+                       Sort-Object FullName -Descending |
+                       Select-Object -First 1
+              if ($found) {
+                $signtoolPath = $found.FullName
+                break
+              }
+            }
+          }
+          
+          if (-not $signtoolPath) {
+            Write-Host "ERROR: signtool.exe not found in Windows SDK paths"
+            Write-Host "Searching entire system..."
+            $found = Get-ChildItem -Path "C:\" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+                     Where-Object { $_.FullName -like "*x64*" } |
+                     Select-Object -First 1
+            if ($found) {
+              $signtoolPath = $found.FullName
+            } else {
+              Write-Host "ERROR: signtool.exe not found anywhere on the system"
+              exit 1
+            }
+          }
+          
+          Write-Host "Found signtool at: $signtoolPath"
+          
           $filesToSign = Get-ChildItem -Path "sign_binaries/windows" -Recurse -Include *.exe
           
           if ($filesToSign.Count -eq 0) {
@@ -208,8 +243,12 @@ jobs:
             Write-Host "Signing: $($file.FullName)"
             try {
               $timestampServer = "http://timestamp.digicert.com"
-              & signtool sign /fd SHA256 /tr $timestampServer /td SHA256 /a "$($file.FullName)"
-              Write-Host "  OK: Signed successfully"
+              & $signtoolPath sign /fd SHA256 /tr $timestampServer /td SHA256 /a "$($file.FullName)"
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "  WARNING: signtool returned exit code $LASTEXITCODE"
+              } else {
+                Write-Host "  OK: Signed successfully"
+              }
             } catch {
               Write-Host "  WARNING: Failed to sign - $($_.Exception.Message)"
             }
