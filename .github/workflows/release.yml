@@ -72,14 +72,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
+      - name: Setup Android SDK & NDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;30.0.3 ndk;21.4.7075529 platform-tools platforms;android-31'
+
+      - name: Setup Android Environment
+        run: |
+          echo "$ANDROID_HOME/ndk/21.4.7075529" >> $GITHUB_PATH
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/21.4.7075529" >> $GITHUB_ENV
+
+      - name: Build Go mobile library (gomobile bind)
+        env:
+          GOPROXY: https://goproxy.io,direct
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@7c4916698cc93475ebfea76748ee0faba2deb2a5
+          gomobile init
+          go get -v golang.org/x/mobile/bind@7c4916698cc93475ebfea76748ee0faba2deb2a5
+          
+          cd core
+          gomobile bind -target android -v -androidapi 16
+          
+          # Copy artifacts to app libs
+          mkdir -p ../app/app/libs
+          cp openp2p.aar openp2p-sources.jar ../app/app/libs/
+          echo "Go mobile library built and copied to app/app/libs/"
+          ls -la ../app/app/libs/
 
       - name: Build unsigned APK
         working-directory: app
