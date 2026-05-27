@@ -84,8 +84,8 @@ jobs:
           path: ${{ env.OUTPUT_NAME }}
           retention-days: 7
 
-  sign-windows:
-    name: Sign Windows Artifacts
+  sign:
+    name: Sign Windows & Android Artifacts (Certum SimplySign)
     needs: [build]
     runs-on: windows-latest
     continue-on-error: true
@@ -97,7 +97,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: openp2p-windows-*
-          path: windows_binaries
+          path: sign_binaries/windows
+          merge-multiple: true
+
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openp2p-android-*
+          path: sign_binaries/android
           merge-multiple: true
 
       - name: Install SimplySign Desktop
@@ -123,15 +130,18 @@ jobs:
           ./.github/scripts/connect-simplySign-enhanced.ps1
         continue-on-error: true
 
-      - name: Sign Windows Executables
+      - name: Sign all binaries (Windows + Android)
         shell: pwsh
         run: |
-          Write-Host "=== SIGNING WINDOWS ARTIFACTS ==="
+          Write-Host "=== SIGNING ALL ARTIFACTS WITH CERTUM CLOUD CERTIFICATE ==="
           
-          $filesToSign = Get-ChildItem -Path "windows_binaries" -Recurse -Include *.exe
+          # Collect all files to sign: Windows .exe + Android binaries
+          $filesToSign = @()
+          $filesToSign += Get-ChildItem -Path "sign_binaries/windows" -Recurse -File
+          $filesToSign += Get-ChildItem -Path "sign_binaries/android" -Recurse -File
           
           if ($filesToSign.Count -eq 0) {
-            Write-Host "No exe files found to sign"
+            Write-Host "No files found to sign"
             exit 0
           }
           
@@ -151,10 +161,10 @@ jobs:
           Write-Host "=== SIGNING COMPLETE ==="
         continue-on-error: true
 
-      - name: Verify Signatures
+      - name: Verify Windows Signatures
         shell: pwsh
         run: |
-          $signedFiles = Get-ChildItem -Path "windows_binaries" -Recurse -Include *.exe
+          $signedFiles = Get-ChildItem -Path "sign_binaries/windows" -Recurse -File
           foreach ($file in $signedFiles) {
             $result = Get-AuthenticodeSignature -FilePath $file.FullName
             $status = if ($result.Status -eq "Valid") { "VALID" } else { "INVALID/UNSIGNED ($($result.Status))" }
@@ -162,68 +172,23 @@ jobs:
           }
         continue-on-error: true
 
-      - name: Upload signed artifacts
+      - name: Upload signed Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: signed-windows-artifacts
-          path: windows_binaries
+          path: sign_binaries/windows
           retention-days: 7
 
-  sign-android:
-    name: Sign Android Artifacts
-    needs: [build]
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Android artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: openp2p-android-*
-          path: android_binaries
-          merge-multiple: true
-
-      - name: Setup Android SDK & sign
-        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          echo "=== SIGNING ANDROID ARTIFACTS ==="
-          
-          # Decode keystore
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android_keystore.jks
-          
-          # Install apksigner via Android SDK build tools
-          sudo apt-get update && sudo apt-get install -y apksigner 2>/dev/null || true
-          
-          # Sign each binary (for .so libraries or standalone binaries)
-          for file in android_binaries/*; do
-            if [ -f "$file" ]; then
-              echo "Signing: $file"
-              # For standalone ELF binaries, we just keep them as-is
-              # APK signing only applies to .apk files
-              echo "  Note: ELF binary, no APK signature needed"
-            fi
-          done
-          
-          echo "=== ANDROID SIGNING COMPLETE ==="
-        continue-on-error: true
-
-      - name: Upload signed artifacts
+      - name: Upload signed Android artifacts
         uses: actions/upload-artifact@v4
         with:
           name: signed-android-artifacts
-          path: android_binaries
+          path: sign_binaries/android
           retention-days: 7
 
   release:
     name: Create Release
-    needs: [build, sign-windows, sign-android]
+    needs: [build, sign]
     runs-on: ubuntu-latest
     if: always()
     steps:
