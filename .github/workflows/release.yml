@@ -37,9 +37,6 @@ jobs:
           # Darwin
           - { os: darwin, arch: amd64, runner: ubuntu-latest, goos: darwin, goarch: amd64, ext: '' }
           - { os: darwin, arch: arm64, runner: ubuntu-latest, goos: darwin, goarch: arm64, ext: '' }
-          # Android
-          - { os: android, arch: amd64, runner: ubuntu-latest, goos: android, goarch: amd64, ext: '' }
-          - { os: android, arch: arm64, runner: ubuntu-latest, goos: android, goarch: arm64, ext: '' }
 
     steps:
       - name: Checkout
@@ -48,31 +45,15 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
-
-      - name: Setup Android NDK
-        if: matrix.goos == 'android'
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r26b
+          go-version: '1.20'
 
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: ${{ matrix.goos == 'android' && '1' || '0' }}
+          CGO_ENABLED: '0'
           GOPROXY: https://goproxy.io,direct
         run: |
-          if [ "${{ matrix.goos }}" = "android" ]; then
-            export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
-            if [ "${{ matrix.goarch }}" = "arm64" ]; then
-              export CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
-            elif [ "${{ matrix.goarch }}" = "amd64" ]; then
-              export CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
-            fi
-          fi
-
           OUTPUT_NAME="${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
           go build -trimpath -ldflags="-s -w" -o "$OUTPUT_NAME" cmd/openp2p.go
           echo "OUTPUT_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
@@ -84,9 +65,52 @@ jobs:
           path: ${{ env.OUTPUT_NAME }}
           retention-days: 7
 
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build unsigned APK
+        working-directory: app
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease -x signRelease || ./gradlew assembleDebug
+          
+          # Find the built APK
+          APK_PATH=$(find . -name "*.apk" -path "*/release/*" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find . -name "*.apk" | head -1)
+          fi
+          
+          if [ -n "$APK_PATH" ]; then
+            cp "$APK_PATH" ../openp2p-android.apk
+            echo "APK built: $APK_PATH"
+          else
+            echo "ERROR: No APK found"
+            exit 1
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openp2p-android-apk
+          path: openp2p-android.apk
+          retention-days: 7
+
   sign:
     name: Sign Windows & Android Artifacts (Certum SimplySign)
-    needs: [build]
+    needs: [build, build-android]
     runs-on: windows-latest
     continue-on-error: true
     steps:
@@ -100,12 +124,17 @@ jobs:
           path: sign_binaries/windows
           merge-multiple: true
 
-      - name: Download Android artifacts
+      - name: Download Android APK
         uses: actions/download-artifact@v4
         with:
-          pattern: openp2p-android-*
+          name: openp2p-android-apk
           path: sign_binaries/android
-          merge-multiple: true
+
+      - name: Setup JDK (for jarsigner)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
       - name: Install SimplySign Desktop
         shell: bash
@@ -130,18 +159,15 @@ jobs:
           ./.github/scripts/connect-simplySign-enhanced.ps1
         continue-on-error: true
 
-      - name: Sign all binaries (Windows + Android)
+      - name: Sign Windows Executables (signtool)
         shell: pwsh
         run: |
-          Write-Host "=== SIGNING ALL ARTIFACTS WITH CERTUM CLOUD CERTIFICATE ==="
+          Write-Host "=== SIGNING WINDOWS ARTIFACTS WITH CERTUM CLOUD CERTIFICATE ==="
           
-          # Collect all files to sign: Windows .exe + Android binaries
-          $filesToSign = @()
-          $filesToSign += Get-ChildItem -Path "sign_binaries/windows" -Recurse -File
-          $filesToSign += Get-ChildItem -Path "sign_binaries/android" -Recurse -File
+          $filesToSign = Get-ChildItem -Path "sign_binaries/windows" -Recurse -Include *.exe
           
           if ($filesToSign.Count -eq 0) {
-            Write-Host "No files found to sign"
+            Write-Host "No exe files found to sign"
             exit 0
           }
           
@@ -158,17 +184,78 @@ jobs:
             }
           }
           
-          Write-Host "=== SIGNING COMPLETE ==="
+          Write-Host "=== WINDOWS SIGNING COMPLETE ==="
+        continue-on-error: true
+
+      - name: Sign Android APK (jarsigner + PKCS#11)
+        shell: pwsh
+        run: |
+          Write-Host "=== SIGNING ANDROID APK WITH CERTUM CLOUD CERTIFICATE (PKCS#11) ==="
+          
+          # Create PKCS#11 config file for Certum SimplySign
+          $pkcs11Config = @"
+          name = CertumSimplySign
+          library = C:\Program Files\Certum\SimplySign Desktop\cryptoCertum3PKCS.dll
+          slot = 0
+          "@
+          $pkcs11Config | Out-File -FilePath "pkcs11.cfg" -Encoding ASCII
+          
+          Write-Host "PKCS#11 config created"
+          
+          # Find APK files
+          $apkFiles = Get-ChildItem -Path "sign_binaries/android" -Recurse -Include *.apk
+          
+          if ($apkFiles.Count -eq 0) {
+            Write-Host "No APK files found to sign"
+            exit 0
+          }
+          
+          # Certum SimplySign default key alias is "1"
+          $keyAlias = "1"
+          Write-Host "Using key alias: $keyAlias"
+          
+          foreach ($apk in $apkFiles) {
+            Write-Host "Signing APK: $($apk.FullName)"
+            try {
+              & jarsigner -verbose `
+                -keystore NONE `
+                -storetype PKCS11 `
+                -providerClass sun.security.pkcs11.SunPKCS11 `
+                -providerArg pkcs11.cfg `
+                -tsa http://time.certum.pl `
+                -signedjar "$($apk.DirectoryName)\signed-$($apk.Name)" `
+                "$($apk.FullName)" `
+                $keyAlias
+              
+              # Replace original with signed version
+              Move-Item -Path "$($apk.DirectoryName)\signed-$($apk.Name)" -Destination $apk.FullName -Force
+              Write-Host "  OK: APK signed successfully"
+            } catch {
+              Write-Host "  WARNING: Failed to sign APK - $($_.Exception.Message)"
+            }
+          }
+          
+          Write-Host "=== ANDROID APK SIGNING COMPLETE ==="
         continue-on-error: true
 
       - name: Verify Windows Signatures
         shell: pwsh
         run: |
-          $signedFiles = Get-ChildItem -Path "sign_binaries/windows" -Recurse -File
+          $signedFiles = Get-ChildItem -Path "sign_binaries/windows" -Recurse -Include *.exe
           foreach ($file in $signedFiles) {
             $result = Get-AuthenticodeSignature -FilePath $file.FullName
             $status = if ($result.Status -eq "Valid") { "VALID" } else { "INVALID/UNSIGNED ($($result.Status))" }
             Write-Host "$($file.Name): $status"
+          }
+        continue-on-error: true
+
+      - name: Verify APK Signature
+        shell: pwsh
+        run: |
+          $apkFiles = Get-ChildItem -Path "sign_binaries/android" -Recurse -Include *.apk
+          foreach ($apk in $apkFiles) {
+            Write-Host "Verifying: $($apk.Name)"
+            & jarsigner -verify -verbose -certs "$($apk.FullName)" 2>&1 | Select-Object -First 10
           }
         continue-on-error: true
 
@@ -179,16 +266,16 @@ jobs:
           path: sign_binaries/windows
           retention-days: 7
 
-      - name: Upload signed Android artifacts
+      - name: Upload signed Android APK
         uses: actions/upload-artifact@v4
         with:
-          name: signed-android-artifacts
+          name: signed-android-apk
           path: sign_binaries/android
           retention-days: 7
 
   release:
     name: Create Release
-    needs: [build, sign]
+    needs: [build, build-android, sign]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -227,22 +314,21 @@ jobs:
           path: release_binaries
           merge-multiple: true
 
-      # Try to download signed Android artifacts first, fall back to unsigned
-      - name: Download signed Android artifacts
+      # Try to download signed Android APK first, fall back to unsigned
+      - name: Download signed Android APK
         id: download-signed-android
         uses: actions/download-artifact@v4
         with:
-          name: signed-android-artifacts
+          name: signed-android-apk
           path: release_binaries
         continue-on-error: true
 
-      - name: Download unsigned Android artifacts (fallback)
+      - name: Download unsigned Android APK (fallback)
         if: steps.download-signed-android.outcome != 'success'
         uses: actions/download-artifact@v4
         with:
-          pattern: openp2p-android-*
+          name: openp2p-android-apk
           path: release_binaries
-          merge-multiple: true
 
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
@@ -268,9 +354,11 @@ jobs:
           
           for file in *; do
             if [ -f "$file" ]; then
-              # Compress each binary
               if [[ "$file" == *.exe ]]; then
                 zip "../release_assets/${file%.exe}-${VERSION}.zip" "$file"
+              elif [[ "$file" == *.apk ]]; then
+                # APK files: rename with version, no compression needed
+                cp "$file" "../release_assets/${file%.apk}-${VERSION}.apk"
               else
                 tar czf "../release_assets/${file}-${VERSION}.tar.gz" "$file"
               fi
