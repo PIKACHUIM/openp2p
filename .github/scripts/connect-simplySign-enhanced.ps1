@@ -156,39 +156,93 @@ $proc = Start-Process -FilePath $ExePath -PassThru
 Write-Host "Process started with ID: $($proc.Id)"
 Write-Host ""
 
-# Wait for the application to initialize
+# Wait for the application to fully initialize (longer wait for CI environments)
 Write-Host "Waiting for SimplySign Desktop to initialize..."
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 10
+
+# Add Win32 API for force foreground window
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class Win32 {
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+    [DllImport("user32.dll")]
+    public static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+    public const int SW_RESTORE = 9;
+    public const int SW_SHOW = 5;
+}
+"@
+
+# Allow our process to set foreground window
+[Win32]::AllowSetForegroundWindow($proc.Id) | Out-Null
 
 # Create WScript.Shell for window interaction
 $wshell = New-Object -ComObject WScript.Shell
 
-# Try to focus the SimplySign Desktop window
+# Try to focus the SimplySign Desktop window using multiple methods
 Write-Host "Attempting to focus SimplySign Desktop window..."
 $focused = $false
 
-# Method 1: Focus by process ID (most reliable)
-$focused = $wshell.AppActivate($proc.Id)
-
-# Method 2: Focus by window title (fallback)
-if (-not $focused) {
-    $focused = $wshell.AppActivate('SimplySign Desktop')
+# Method 1: Use Win32 API to find and activate window
+$mainWindowHandle = $proc.MainWindowHandle
+if ($mainWindowHandle -ne [IntPtr]::Zero) {
+    [Win32]::ShowWindow($mainWindowHandle, [Win32]::SW_RESTORE) | Out-Null
+    [Win32]::SetForegroundWindow($mainWindowHandle) | Out-Null
+    $focused = $true
+    Write-Host "Focused via MainWindowHandle"
 }
 
-# Method 3: Multiple attempts with slight delays
-for ($i = 0; (-not $focused) -and ($i -lt 10); $i++) {
-    Start-Sleep -Milliseconds 500
-    $focused = $wshell.AppActivate($proc.Id) -or $wshell.AppActivate('SimplySign Desktop')
+# Method 2: Find window by title
+if (-not $focused) {
+    $hwnd = [Win32]::FindWindow($null, "SimplySign Desktop")
+    if ($hwnd -ne [IntPtr]::Zero) {
+        [Win32]::ShowWindow($hwnd, [Win32]::SW_RESTORE) | Out-Null
+        [Win32]::SetForegroundWindow($hwnd) | Out-Null
+        $focused = $true
+        Write-Host "Focused via FindWindow"
+    }
+}
+
+# Method 3: AppActivate with extended retries
+for ($i = 0; (-not $focused) -and ($i -lt 20); $i++) {
+    Start-Sleep -Milliseconds 1000
+    
+    # Refresh process handle
+    $proc.Refresh()
+    $mainWindowHandle = $proc.MainWindowHandle
+    if ($mainWindowHandle -ne [IntPtr]::Zero) {
+        [Win32]::ShowWindow($mainWindowHandle, [Win32]::SW_RESTORE) | Out-Null
+        [Win32]::SetForegroundWindow($mainWindowHandle) | Out-Null
+        $focused = $true
+        Write-Host "Focused via MainWindowHandle (attempt $($i + 1))"
+        break
+    }
+    
+    $focused = $wshell.AppActivate($proc.Id)
+    if (-not $focused) {
+        $focused = $wshell.AppActivate('SimplySign Desktop')
+    }
+    if (-not $focused) {
+        $focused = $wshell.AppActivate('SimplySign')
+    }
     Write-Host "Focus attempt $($i + 1): $focused"
 }
 
 if (-not $focused) {
-    Write-Host "ERROR: Could not bring SimplySign Desktop to foreground"
-    Write-Host "Login dialog may not be visible for credential injection"
-    exit 1
+    Write-Host "WARNING: Could not confirm foreground focus"
+    Write-Host "Attempting to send credentials anyway..."
 }
 
-Write-Host "Successfully focused SimplySign Desktop window"
 Write-Host ""
 
 # Small delay to ensure window is ready for input
