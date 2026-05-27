@@ -85,7 +85,7 @@ jobs:
         working-directory: app
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease -x signRelease || ./gradlew assembleDebug
+          ./gradlew assembleRelease
           
           # Find the built APK
           APK_PATH=$(find . -name "*.apk" -path "*/release/*" | head -1)
