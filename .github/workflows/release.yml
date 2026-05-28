@@ -220,30 +220,7 @@ jobs:
           echo "Comprehensive certificate availability check..."
           echo ""
 
-          echo "=== Windows Certificate Store Analysis ==="
-          powershell -Command "
-            Write-Host 'Current User Personal Store:'
-            Get-ChildItem -Path 'Cert:\\CurrentUser\\My' -ErrorAction SilentlyContinue |
-              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
-              Format-Table -AutoSize
-
-            Write-Host 'Local Machine Personal Store:'
-            Get-ChildItem -Path 'Cert:\\LocalMachine\\My' -ErrorAction SilentlyContinue |
-              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
-              Format-Table -AutoSize
-
-            Write-Host 'Searching for Certum-related certificates:'
-            Get-ChildItem -Path 'Cert:\\CurrentUser\\*','Cert:\\LocalMachine\\*' -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { \$_.Subject -like '*Certum*' -or \$_.Issuer -like '*Certum*' -or \$_.Subject -like '*Code Signing*' } |
-              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
-              Format-Table -AutoSize
-
-            Write-Host 'Certificates with Code Signing capability:'
-            Get-ChildItem -Path 'Cert:\\CurrentUser\\My','Cert:\\LocalMachine\\My' -ErrorAction SilentlyContinue |
-              Where-Object { \$_.EnhancedKeyUsageList -like '*Code Signing*' } |
-              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
-              Format-Table -AutoSize
-          "
+          echo "Skipping certificate store dump to avoid exposing certificate metadata in logs"
 
           echo ""
           echo "=== PKCS#11 Library Check ==="
