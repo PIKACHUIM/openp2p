@@ -350,8 +350,7 @@ jobs:
             VERSION="${{ inputs.version }}"
             IS_BETA="false"
           else
-            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            VERSION="beta-${SHORT_SHA}"
+            VERSION="beta"
             IS_BETA="true"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -438,9 +437,9 @@ jobs:
         run: |
           if [ "$IS_BETA" = "true" ]; then
             cat > release_notes.md << EOF
-          ## OpenP2P Beta Release ($VERSION)
+          ## OpenP2P Beta Release (latest unstable)
 
-          This is an automated beta release from commit \`${{ github.sha }}\`.
+          Built from commit \`${{ github.sha }}\` on $(date -u +"%Y-%m-%d %H:%M UTC").
 
           ### Supported Platforms
           | OS | Architectures |
@@ -450,7 +449,7 @@ jobs:
           | Darwin (macOS) | amd64, arm64 |
           | Android | amd64, arm64 |
 
-          > **Note**: This is a pre-release build and may be unstable.
+          > **Note**: This is a pre-release build and may be unstable. This release is automatically updated on every push to master.
           EOF
           else
             cat > release_notes.md << EOF
@@ -466,12 +465,20 @@ jobs:
           EOF
           fi
 
+      - name: Delete existing Beta Release
+        if: steps.version.outputs.is_beta == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete existing beta release if it exists
+          gh release delete beta --yes --cleanup-tag 2>/dev/null || true
+
       - name: Create Beta Release
         if: steps.version.outputs.is_beta == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          name: "Beta ${{ steps.version.outputs.version }}"
-          tag_name: ${{ steps.version.outputs.version }}
+          name: "Beta (latest unstable)"
+          tag_name: beta
           body_path: release_notes.md
           prerelease: true
           files: release_assets/*
