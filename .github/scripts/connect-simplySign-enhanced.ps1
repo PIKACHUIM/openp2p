@@ -5,8 +5,28 @@
 param(
     [string]$OtpUri = $env:CERTUM_OTP_URI,
     [string]$UserId = $env:CERTUM_USERNAME,
-    [string]$ExePath = $env:CERTUM_EXE_PATH
+    [string]$ExePath = $env:CERTUM_EXE_PATH,
+    [string]$ExpectedCertificateSHA1 = $env:CERTUM_CERTIFICATE_SHA1
 )
+
+function Normalize-Sha1 {
+    param([string]$InputSha1)
+    if (-not $InputSha1) {
+        return $null
+    }
+    return ($InputSha1 -replace "[^a-fA-F0-9]", "").ToUpperInvariant()
+}
+
+function Find-CertificateByThumbprint {
+    param([string]$Thumbprint)
+
+    if (-not $Thumbprint) {
+        return @()
+    }
+
+    $all = Get-ChildItem -Path "Cert:\CurrentUser\My", "Cert:\LocalMachine\My" -ErrorAction SilentlyContinue
+    return @($all | Where-Object { $_.Thumbprint -eq $Thumbprint })
+}
 
 # Validate required parameters
 if (-not $OtpUri) {
@@ -239,8 +259,9 @@ for ($i = 0; (-not $focused) -and ($i -lt 20); $i++) {
 }
 
 if (-not $focused) {
-    Write-Host "WARNING: Could not confirm foreground focus"
-    Write-Host "Attempting to send credentials anyway..."
+    Write-Host "ERROR: Could not bring SimplySign Desktop to foreground"
+    Write-Host "Login dialog may not be visible for credential injection"
+    exit 1
 }
 
 Write-Host ""
@@ -267,6 +288,44 @@ Write-Host ""
 # Wait for authentication to process
 Write-Host "Waiting for authentication to complete..."
 Start-Sleep -Seconds 5
+
+$normalizedExpectedSha1 = Normalize-Sha1 -InputSha1 $ExpectedCertificateSHA1
+if ($normalizedExpectedSha1) {
+    if ($normalizedExpectedSha1.Length -ne 40) {
+        Write-Host "ERROR: CERTUM_CERTIFICATE_SHA1 is invalid after normalization"
+        Write-Host "Raw length: $($ExpectedCertificateSHA1.Length), normalized length: $($normalizedExpectedSha1.Length)"
+        exit 1
+    }
+
+    Write-Host "Validating certificate availability for thumbprint: $($normalizedExpectedSha1.Substring(0, 16))... (truncated)"
+    $ready = $false
+    $withPrivateKey = $false
+
+    for ($i = 0; $i -lt 30; $i++) {
+        $matched = Find-CertificateByThumbprint -Thumbprint $normalizedExpectedSha1
+        if ($matched.Count -gt 0) {
+            $ready = $true
+            $withPrivateKey = ($matched | Where-Object { $_.HasPrivateKey }).Count -gt 0
+            if ($withPrivateKey) {
+                Write-Host "Certificate is available and has private key"
+                break
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    if (-not $ready) {
+        Write-Host "ERROR: Target certificate was not found in Cert:\CurrentUser\My or Cert:\LocalMachine\My"
+        Write-Host "Authentication likely failed or CERTUM_CERTIFICATE_SHA1 is incorrect"
+        exit 1
+    }
+
+    if (-not $withPrivateKey) {
+        Write-Host "ERROR: Target certificate found but no private key is available"
+        Write-Host "Signing cannot continue without private key access"
+        exit 1
+    }
+}
 
 # Verify SimplySign Desktop is still running
 $stillRunning = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
