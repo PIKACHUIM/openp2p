@@ -190,42 +190,50 @@ jobs:
           ./.github/scripts/connect-simplySign-enhanced.ps1
         continue-on-error: true
 
+      - name: Wait for certificate registration
+        shell: pwsh
+        run: |
+          Write-Host "Waiting for SimplySign to register certificate..."
+          $maxWait = 30
+          $found = $false
+          for ($i = 0; $i -lt $maxWait; $i++) {
+            $certs = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert 2>$null
+            if ($certs.Count -gt 0) {
+              Write-Host "Certificate found after $($i * 2) seconds:"
+              foreach ($cert in $certs) {
+                Write-Host "  Subject: $($cert.Subject)"
+                Write-Host "  Thumbprint: $($cert.Thumbprint)"
+                Write-Host "  NotAfter: $($cert.NotAfter)"
+              }
+              $found = $true
+              break
+            }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $found) {
+            Write-Host "WARNING: No code signing certificate found in store after $($maxWait * 2) seconds"
+            Write-Host "Listing all certificates in CurrentUser\My:"
+            Get-ChildItem -Path Cert:\CurrentUser\My | ForEach-Object {
+              Write-Host "  $($_.Subject) | $($_.Thumbprint)"
+            }
+          }
+        continue-on-error: true
+
       - name: Sign Windows Executables (signtool)
         shell: pwsh
+        env:
+          CERTUM_CERTIFICATE_SHA1: ${{ secrets.CERTUM_CERTIFICATE_SHA1 }}
         run: |
           Write-Host "=== SIGNING WINDOWS ARTIFACTS WITH CERTUM CLOUD CERTIFICATE ==="
           
-          # 查找 signtool.exe 路径（Windows SDK 自带但未加入 PATH）
-          $signtoolPath = $null
-          $sdkPaths = @(
-            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-            "${env:ProgramFiles}\Windows Kits\10\bin"
-          )
-          foreach ($sdkPath in $sdkPaths) {
-            if (Test-Path $sdkPath) {
-              $found = Get-ChildItem -Path $sdkPath -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-                       Where-Object { $_.FullName -like "*x64*" } |
-                       Sort-Object FullName -Descending |
-                       Select-Object -First 1
-              if ($found) {
-                $signtoolPath = $found.FullName
-                break
-              }
-            }
-          }
+          $signtoolPath = (Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+                           Where-Object { $_.FullName -like "*x64*" } |
+                           Sort-Object FullName -Descending |
+                           Select-Object -First 1).FullName
           
           if (-not $signtoolPath) {
-            Write-Host "ERROR: signtool.exe not found in Windows SDK paths"
-            Write-Host "Searching entire system..."
-            $found = Get-ChildItem -Path "C:\" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-                     Where-Object { $_.FullName -like "*x64*" } |
-                     Select-Object -First 1
-            if ($found) {
-              $signtoolPath = $found.FullName
-            } else {
-              Write-Host "ERROR: signtool.exe not found anywhere on the system"
-              exit 1
-            }
+            Write-Host "ERROR: signtool.exe not found"
+            exit 1
           }
           
           Write-Host "Found signtool at: $signtoolPath"
@@ -239,18 +247,28 @@ jobs:
           
           Write-Host "Found $($filesToSign.Count) files to sign"
           
+          # Use SHA1 thumbprint if available, otherwise use /a (auto-select)
+          $sha1 = $env:CERTUM_CERTIFICATE_SHA1
+          if ($sha1) {
+            Write-Host "Using certificate SHA1: $sha1"
+          } else {
+            Write-Host "No SHA1 specified, using /a (auto-select)"
+          }
+          
           foreach ($file in $filesToSign) {
             Write-Host "Signing: $($file.FullName)"
-            try {
-              $timestampServer = "http://timestamp.digicert.com"
+            $timestampServer = "http://timestamp.digicert.com"
+            
+            if ($sha1) {
+              & $signtoolPath sign /fd SHA256 /tr $timestampServer /td SHA256 /sha1 $sha1 "$($file.FullName)"
+            } else {
               & $signtoolPath sign /fd SHA256 /tr $timestampServer /td SHA256 /a "$($file.FullName)"
-              if ($LASTEXITCODE -ne 0) {
-                Write-Host "  WARNING: signtool returned exit code $LASTEXITCODE"
-              } else {
-                Write-Host "  OK: Signed successfully"
-              }
-            } catch {
-              Write-Host "  WARNING: Failed to sign - $($_.Exception.Message)"
+            }
+            
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "  WARNING: signtool returned exit code $LASTEXITCODE"
+            } else {
+              Write-Host "  OK: Signed successfully"
             }
           }
           
