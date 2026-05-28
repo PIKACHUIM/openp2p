@@ -9,9 +9,35 @@ echo "Using proven installation method from successful testing..."
 
 # Download SimplySign Desktop MSI
 CERTUM_INSTALLER="SimplySignDesktop.msi"
+CERTUM_DOWNLOAD_PAGE="https://pomoc.certum.pl/pl/oprogramowanie/procertum-smartsign/"
+FALLBACK_MSI_URL="https://files.certum.eu/software/SimplySignDesktop/Windows/9.4.3.90/SimplySignDesktop-9.4.3.90-64-bit-pl.msi"
 echo "Downloading SimplySign Desktop MSI..."
 
-if curl -L "https://files.certum.eu/software/SimplySignDesktop/Windows/9.4.3.90/SimplySignDesktop-9.4.3.90-64-bit-pl.msi" -o "$CERTUM_INSTALLER" --fail --max-time 60; then
+# Resolve the latest 64-bit MSI URL from Certum software page to avoid hardcoded version expiry.
+PAGE_CONTENT="$(curl -L "$CERTUM_DOWNLOAD_PAGE" --fail --max-time 60 || true)"
+
+MSI_CANDIDATES="$(printf '%s' "$PAGE_CONTENT" | grep -oE 'https://(www\.)?files\.certum\.eu/software/SimplySignDesktop/Windows/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/SimplySignDesktop-[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-64-bit[^"[:space:]]*\.msi' | sort -u || true)"
+
+DOWNLOAD_URL=""
+if [ -n "$MSI_CANDIDATES" ]; then
+  LATEST_VERSION="$(printf '%s\n' "$MSI_CANDIDATES" | sed -E 's#^.*/Windows/([0-9.]+)/.*$#\1#' | sort -V | tail -n1)"
+  LATEST_VERSION_URLS="$(printf '%s\n' "$MSI_CANDIDATES" | grep "/Windows/${LATEST_VERSION}/" || true)"
+  DOWNLOAD_URL="$(printf '%s\n' "$LATEST_VERSION_URLS" | grep -- '-64-bit-pl\.msi$' | head -n1 || true)"
+
+  if [ -z "$DOWNLOAD_URL" ]; then
+    DOWNLOAD_URL="$(printf '%s\n' "$LATEST_VERSION_URLS" | head -n1)"
+  fi
+fi
+
+if [ -z "$DOWNLOAD_URL" ]; then
+  echo "WARNING: Could not resolve latest MSI URL from Certum page, using fallback URL"
+  DOWNLOAD_URL="$FALLBACK_MSI_URL"
+fi
+
+RESOLVED_VERSION="$(printf '%s' "$DOWNLOAD_URL" | sed -E 's#^.*/Windows/([0-9.]+)/.*$#\1#')"
+echo "Resolved SimplySign Desktop MSI version: $RESOLVED_VERSION"
+
+if curl -L "$DOWNLOAD_URL" -o "$CERTUM_INSTALLER" --fail --max-time 60; then
   echo "✅ Downloaded SimplySign Desktop MSI ($(ls -lh "$CERTUM_INSTALLER" | awk '{print $5}'))"
 else
   echo "❌ Failed to download SimplySign Desktop"
