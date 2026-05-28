@@ -212,9 +212,38 @@ jobs:
           }
           if (-not $found) {
             Write-Host "WARNING: No code signing certificate found in store after $($maxWait * 2) seconds"
-            Write-Host "Listing all certificates in CurrentUser\My:"
-            Get-ChildItem -Path Cert:\CurrentUser\My | ForEach-Object {
-              Write-Host "  $($_.Subject) | $($_.Thumbprint)"
+            Write-Host ""
+            Write-Host "=== ALL certificates in CurrentUser\My ==="
+            $allCerts = Get-ChildItem -Path Cert:\CurrentUser\My
+            if ($allCerts.Count -eq 0) {
+              Write-Host "  (EMPTY - no certificates at all)"
+            } else {
+              foreach ($cert in $allCerts) {
+                Write-Host "  Subject: $($cert.Subject)"
+                Write-Host "  Thumbprint: $($cert.Thumbprint)"
+                Write-Host "  HasPrivateKey: $($cert.HasPrivateKey)"
+                Write-Host "  NotAfter: $($cert.NotAfter)"
+                Write-Host "  EnhancedKeyUsage: $($cert.EnhancedKeyUsageList)"
+                Write-Host "  ---"
+              }
+            }
+            Write-Host ""
+            Write-Host "=== ALL certificates in LocalMachine\My ==="
+            $lmCerts = Get-ChildItem -Path Cert:\LocalMachine\My -ErrorAction SilentlyContinue
+            if ($lmCerts.Count -eq 0) {
+              Write-Host "  (EMPTY)"
+            } else {
+              foreach ($cert in $lmCerts) {
+                Write-Host "  Subject: $($cert.Subject)"
+                Write-Host "  Thumbprint: $($cert.Thumbprint)"
+                Write-Host "  HasPrivateKey: $($cert.HasPrivateKey)"
+                Write-Host "  ---"
+              }
+            }
+            Write-Host ""
+            Write-Host "=== SimplySign process status ==="
+            Get-Process -Name "*SimplySign*" -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "  PID: $($_.Id) | Name: $($_.ProcessName) | Status: $($_.Responding)"
             }
           }
         continue-on-error: true
@@ -238,6 +267,23 @@ jobs:
           
           Write-Host "Found signtool at: $signtoolPath"
           
+          # Debug: Show the SHA1 we're looking for
+          $sha1 = $env:CERTUM_CERTIFICATE_SHA1
+          Write-Host "Specified certificate SHA1: [$sha1]"
+          Write-Host "SHA1 length: $($sha1.Length)"
+          
+          # Debug: List all certificates in all stores
+          Write-Host ""
+          Write-Host "=== Certificates in CurrentUser\My ==="
+          Get-ChildItem -Path Cert:\CurrentUser\My | ForEach-Object {
+            Write-Host "  Thumbprint: $($_.Thumbprint) | Subject: $($_.Subject) | HasPrivateKey: $($_.HasPrivateKey)"
+          }
+          Write-Host "=== Certificates in CurrentUser\Root ==="
+          Get-ChildItem -Path Cert:\CurrentUser\Root | Select-Object -First 5 | ForEach-Object {
+            Write-Host "  Thumbprint: $($_.Thumbprint) | Subject: $($_.Subject)"
+          }
+          Write-Host ""
+          
           $filesToSign = Get-ChildItem -Path "sign_binaries/windows" -Recurse -Include *.exe
           
           if ($filesToSign.Count -eq 0) {
@@ -246,14 +292,6 @@ jobs:
           }
           
           Write-Host "Found $($filesToSign.Count) files to sign"
-          
-          # Use SHA1 thumbprint if available, otherwise use /a (auto-select)
-          $sha1 = $env:CERTUM_CERTIFICATE_SHA1
-          if ($sha1) {
-            Write-Host "Using certificate SHA1: $sha1"
-          } else {
-            Write-Host "No SHA1 specified, using /a (auto-select)"
-          }
           
           foreach ($file in $filesToSign) {
             Write-Host "Signing: $($file.FullName)"
