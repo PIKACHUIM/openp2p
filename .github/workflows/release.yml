@@ -167,191 +167,98 @@ jobs:
       #     java-version: '17'
       #     distribution: 'temurin'
 
-      - name: Install SimplySign Desktop
+      - name: Setup Certum Code Signing (Windows)
         shell: bash
         run: |
-          chmod +x .github/scripts/install-simplysign.sh
-          .github/scripts/install-simplysign.sh
+          echo "=== SETTING UP CERTUM CODE SIGNING FOR WINDOWS ==="
+          echo "Installing SimplySign Desktop and configuring for automatic authentication"
+
+          chmod +x ./.github/scripts/install-simplysign.sh
+          ./.github/scripts/install-simplysign.sh
+
+          echo "Configuring registry for automatic login dialog..."
+          powershell -ExecutionPolicy Bypass -File "./.github/scripts/configure-simplysign-registry.ps1"
+
+          echo "Certum signing environment ready"
         continue-on-error: true
 
-      - name: Configure SimplySign Registry
-        shell: pwsh
-        run: |
-          ./.github/scripts/configure-simplysign-registry.ps1
-        continue-on-error: true
-
-      - name: Connect to SimplySign (TOTP Authentication)
-        shell: pwsh
+      - name: Authenticate Certum (Windows)
+        shell: bash
         env:
           CERTUM_OTP_URI: ${{ secrets.CERTUM_OTP_URI }}
           CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
           CERTUM_EXE_PATH: ${{ secrets.CERTUM_EXE_PATH }}
         run: |
-          ./.github/scripts/connect-simplySign-enhanced.ps1
+          echo "=== CERTUM AUTHENTICATION ==="
+          echo "Authenticating with Certum cloud certificate using TOTP"
+
+          powershell -ExecutionPolicy Bypass -File "./.github/scripts/connect-simplySign-enhanced.ps1"
+
+          echo "Authentication completed"
         continue-on-error: true
 
-      - name: Wait for SimplySign readiness
-        shell: pwsh
-        run: |
-          Write-Host "Waiting for SimplySign Desktop process..."
-          $maxWait = 30
-          $ready = $false
-
-          for ($i = 0; $i -lt $maxWait; $i++) {
-            $processes = Get-Process -Name "*SimplySign*" -ErrorAction SilentlyContinue
-            if ($processes) {
-              Write-Host "SimplySign process detected after $($i * 2) seconds:"
-              $processes | ForEach-Object {
-                Write-Host "  PID: $($_.Id) | Name: $($_.ProcessName) | Status: $($_.Responding)"
-              }
-              $ready = $true
-              break
-            }
-            Start-Sleep -Seconds 2
-          }
-
-          if (-not $ready) {
-            Write-Host "WARNING: SimplySign process not detected after $($maxWait * 2) seconds"
-            Write-Host "Signing may still fail if cloud session is not fully ready"
-          }
-
-          Write-Host "NOTE: Cloud certificates may not be visible in Cert:\CurrentUser\My."
-          Write-Host "Readiness will be validated by signtool using CERTUM_CERTIFICATE_SHA1."
-        continue-on-error: true
-
-      - name: Sign Windows Executables (signtool)
-        shell: pwsh
+      - name: Verify Certificate and Sign Windows Binaries
+        shell: bash
         env:
           CERTUM_CERTIFICATE_SHA1: ${{ secrets.CERTUM_CERTIFICATE_SHA1 }}
         run: |
-          Write-Host "=== WINDOWS BINARY SIGNING (CERTUM SIMPLYSIGN) ==="
+          echo "=== CERTIFICATE VERIFICATION AND WINDOWS BINARY SIGNING ==="
+          echo "Allowing connection to stabilize..."
+          sleep 10
 
-          $targetDirectory = "sign_binaries/windows"
-          $timestampServer = "http://time.certum.pl"
+          echo "Comprehensive certificate availability check..."
+          echo ""
 
-          if (-not (Test-Path $targetDirectory)) {
-            Write-Host "ERROR: Target directory not found: $targetDirectory"
-            exit 1
-          }
+          echo "=== Windows Certificate Store Analysis ==="
+          powershell -Command "
+            Write-Host 'Current User Personal Store:'
+            Get-ChildItem -Path 'Cert:\\CurrentUser\\My' -ErrorAction SilentlyContinue |
+              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
+              Format-Table -AutoSize
 
-          $rawSha1 = $env:CERTUM_CERTIFICATE_SHA1
-          if (-not $rawSha1) {
-            Write-Host "ERROR: CERTUM_CERTIFICATE_SHA1 environment variable not provided"
-            exit 1
-          }
+            Write-Host 'Local Machine Personal Store:'
+            Get-ChildItem -Path 'Cert:\\LocalMachine\\My' -ErrorAction SilentlyContinue |
+              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
+              Format-Table -AutoSize
 
-          $certificateSha1 = ($rawSha1 -replace "[^a-fA-F0-9]", "").ToUpperInvariant()
-          if ($certificateSha1.Length -ne 40) {
-            Write-Host "ERROR: CERTUM_CERTIFICATE_SHA1 is invalid after normalization"
-            Write-Host "Raw length: $($rawSha1.Length), normalized length: $($certificateSha1.Length)"
-            exit 1
-          }
+            Write-Host 'Searching for Certum-related certificates:'
+            Get-ChildItem -Path 'Cert:\\CurrentUser\\*','Cert:\\LocalMachine\\*' -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { \$_.Subject -like '*Certum*' -or \$_.Issuer -like '*Certum*' -or \$_.Subject -like '*Code Signing*' } |
+              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
+              Format-Table -AutoSize
 
-          Write-Host "Certificate SHA1: $($certificateSha1.Substring(0, 16))... (truncated)"
+            Write-Host 'Certificates with Code Signing capability:'
+            Get-ChildItem -Path 'Cert:\\CurrentUser\\My','Cert:\\LocalMachine\\My' -ErrorAction SilentlyContinue |
+              Where-Object { \$_.EnhancedKeyUsageList -like '*Code Signing*' } |
+              Select-Object Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter |
+              Format-Table -AutoSize
+          "
 
-          Write-Host "Locating signtool..."
-          $signTool = $null
-          $windowsKitsBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
-          if (Test-Path $windowsKitsBin) {
-            $signTool = (
-              Get-ChildItem -Path $windowsKitsBin -Recurse -File -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
-                Sort-Object -Property @{
-                  Expression = {
-                    if ($_.FullName -match "\\bin\\([^\\]+)\\x64\\signtool\.exe$") {
-                      try { [version]$matches[1] } catch { [version]"0.0" }
-                    } else {
-                      [version]"0.0"
-                    }
-                  }
-                  Descending = $true
-                } |
-                Select-Object -First 1
-            ).FullName
-          }
+          echo ""
+          echo "=== PKCS#11 Library Check ==="
+          if [ -f "/c/Windows/System32/SimplySignPKCS.dll" ]; then
+            echo "PKCS#11 library present: /c/Windows/System32/SimplySignPKCS.dll"
+            ls -la "/c/Windows/System32/SimplySignPKCS.dll"
+          else
+            echo "PKCS#11 library not found"
+          fi
 
-          if (-not $signTool) {
-            $cmd = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
-            if ($cmd) {
-              $signTool = $cmd.Source
-            }
-          }
+          echo ""
+          echo "=== SimplySign Desktop Status ==="
+          powershell -Command "
+            Write-Host 'SimplySign Desktop process status:'
+            Get-Process -Name '*SimplySign*' -ErrorAction SilentlyContinue |
+              Select-Object Name, Id, MainWindowTitle, Responding |
+              Format-Table -AutoSize
+          "
 
-          if (-not $signTool) {
-            Write-Host "ERROR: signtool.exe not found"
-            exit 1
-          }
+          echo ""
+          echo "Certificate debugging completed - proceeding to signing..."
+          echo ""
 
-          Write-Host "Found signtool: $signTool"
-          Write-Host "Using direct SHA1 signing mode from CERTUM_CERTIFICATE_SHA1"
+          powershell -ExecutionPolicy Bypass -File "./.github/scripts/sign-openp2p-windows.ps1" -TargetDirectory "sign_binaries/windows"
 
-          Write-Host "Scanning for Windows binaries to sign..."
-          $filesToSign = Get-ChildItem -Path $targetDirectory -Recurse -File | Where-Object { $_.Extension -ieq ".exe" }
-
-          if (($null -eq $filesToSign) -or ($filesToSign.Count -eq 0)) {
-            Write-Host "WARNING: No .exe files found to sign"
-            exit 0
-          }
-
-          Write-Host "Found $($filesToSign.Count) files to sign"
-          $signedCount = 0
-          $failedCount = 0
-
-          foreach ($file in $filesToSign) {
-            Write-Host "=== Signing: $($file.Name) ==="
-            Write-Host "Path: $($file.FullName)"
-
-            $attempts = @(
-              @{ Name = "Direct SHA1 + /td"; Args = @("sign", "/sha1", $certificateSha1, "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
-              @{ Name = "Direct SHA1 (without /td)"; Args = @("sign", "/sha1", $certificateSha1, "/tr", $timestampServer, "/fd", "SHA256", "/v", $file.FullName) },
-              @{ Name = "Direct SHA1 in CurrentUser\\My"; Args = @("sign", "/sha1", $certificateSha1, "/s", "My", "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
-              @{ Name = "Direct SHA1 in LocalMachine\\My"; Args = @("sign", "/sha1", $certificateSha1, "/sm", "/s", "My", "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) }
-            )
-
-            $signed = $false
-            foreach ($attempt in $attempts) {
-              Write-Host "Attempt: $($attempt.Name)"
-              $signOutput = & $signTool @($attempt.Args) 2>&1
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "SUCCESS: $($attempt.Name)"
-                $signed = $true
-                break
-              }
-
-              Write-Host "FAILED: $($attempt.Name)"
-              Write-Host "$signOutput"
-            }
-
-            if ($signed) {
-              $signedCount++
-              $verifyOutput = & $signTool verify /pa /v $file.FullName 2>&1
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "VERIFIED: Signature verification successful"
-              } else {
-                Write-Host "WARNING: Signature verification failed"
-                Write-Host "$verifyOutput"
-              }
-            } else {
-              $failedCount++
-            }
-
-            Write-Host ""
-          }
-
-          Write-Host "=== SIGNING SUMMARY ==="
-          Write-Host "Total files: $($filesToSign.Count)"
-          Write-Host "Successfully signed: $signedCount"
-          Write-Host "Failed to sign: $failedCount"
-
-          if ($failedCount -eq 0) {
-            Write-Host "ALL WINDOWS BINARIES SIGNED SUCCESSFULLY"
-            $global:LASTEXITCODE = 0
-            exit 0
-          }
-
-          Write-Host "SOME WINDOWS BINARIES FAILED TO SIGN"
-          $global:LASTEXITCODE = 1
-          exit 1
+          echo "Windows binary signing completed"
         continue-on-error: true
 
       # - name: Sign Android APK (jarsigner + PKCS#11)
