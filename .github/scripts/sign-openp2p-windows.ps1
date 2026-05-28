@@ -44,6 +44,27 @@ function Get-LatestSignToolPath {
     return $null
 }
 
+function Find-TargetCertificate {
+    param([string]$Thumbprint)
+
+    $all = Get-ChildItem -Path "Cert:\CurrentUser\My", "Cert:\LocalMachine\My" -ErrorAction SilentlyContinue
+    return @($all | Where-Object { $_.Thumbprint -eq $Thumbprint })
+}
+
+function Show-PrivateKeyCertificateHints {
+    $candidates = Get-ChildItem -Path "Cert:\CurrentUser\My", "Cert:\LocalMachine\My" -ErrorAction SilentlyContinue |
+        Where-Object { $_.HasPrivateKey } |
+        Select-Object -First 10 Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter
+
+    if (($null -eq $candidates) -or ($candidates.Count -eq 0)) {
+        Write-Host "No certificates with private keys were found in Personal stores"
+        return
+    }
+
+    Write-Host "Available certificates with private keys (first 10):"
+    $candidates | Format-Table -AutoSize
+}
+
 Write-Host "=== WINDOWS BINARY SIGNING (CERTUM SIMPLYSIGN) ==="
 Write-Host "Target directory: $TargetDirectory"
 
@@ -65,6 +86,22 @@ if ($normalizedSha1.Length -ne 40) {
 }
 
 Write-Host "Certificate SHA1: $($normalizedSha1.Substring(0, 16))... (truncated)"
+
+$targetCerts = Find-TargetCertificate -Thumbprint $normalizedSha1
+if (($null -eq $targetCerts) -or ($targetCerts.Count -eq 0)) {
+    Write-Host "ERROR: Target certificate not found in Cert:\CurrentUser\My or Cert:\LocalMachine\My"
+    Write-Host "Authentication likely failed or CERTUM_CERTIFICATE_SHA1 is incorrect"
+    Show-PrivateKeyCertificateHints
+    exit 1
+}
+
+$targetWithPrivateKey = @($targetCerts | Where-Object { $_.HasPrivateKey })
+if (($null -eq $targetWithPrivateKey) -or ($targetWithPrivateKey.Count -eq 0)) {
+    Write-Host "ERROR: Target certificate exists but has no available private key"
+    Write-Host "Signing cannot continue without private key access"
+    Show-PrivateKeyCertificateHints
+    exit 1
+}
 
 Write-Host "Locating signtool..."
 $signTool = Get-LatestSignToolPath
@@ -93,7 +130,6 @@ foreach ($file in $filesToSign) {
 
     $attempts = @(
         @{ Name = "Direct SHA1 + /td"; Args = @("sign", "/sha1", $normalizedSha1, "/tr", $TimestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
-        @{ Name = "Direct SHA1 (without /td)"; Args = @("sign", "/sha1", $normalizedSha1, "/tr", $TimestampServer, "/fd", "SHA256", "/v", $file.FullName) },
         @{ Name = "Direct SHA1 in CurrentUser\\My"; Args = @("sign", "/sha1", $normalizedSha1, "/s", "My", "/tr", $TimestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
         @{ Name = "Direct SHA1 in LocalMachine\\My"; Args = @("sign", "/sha1", $normalizedSha1, "/sm", "/s", "My", "/tr", $TimestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) }
     )
