@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -70,7 +70,7 @@ jobs:
   #   runs-on: ubuntu-latest
   #   steps:
   #     - name: Checkout
-  #       uses: actions/checkout@v4
+  #       uses: actions/checkout@v6
   #
   #     - name: Setup Go
   #       uses: actions/setup-go@v5
@@ -146,7 +146,7 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
@@ -253,64 +253,166 @@ jobs:
         env:
           CERTUM_CERTIFICATE_SHA1: ${{ secrets.CERTUM_CERTIFICATE_SHA1 }}
         run: |
-          Write-Host "=== SIGNING WINDOWS ARTIFACTS WITH CERTUM CLOUD CERTIFICATE ==="
-          
-          $signtoolPath = (Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-                           Where-Object { $_.FullName -like "*x64*" } |
-                           Sort-Object FullName -Descending |
-                           Select-Object -First 1).FullName
-          
-          if (-not $signtoolPath) {
+          Write-Host "=== WINDOWS BINARY SIGNING (CERTUM SIMPLYSIGN) ==="
+
+          $targetDirectory = "sign_binaries/windows"
+          $timestampServer = "http://time.certum.pl"
+
+          if (-not (Test-Path $targetDirectory)) {
+            Write-Host "ERROR: Target directory not found: $targetDirectory"
+            exit 1
+          }
+
+          $rawSha1 = $env:CERTUM_CERTIFICATE_SHA1
+          if (-not $rawSha1) {
+            Write-Host "ERROR: CERTUM_CERTIFICATE_SHA1 environment variable not provided"
+            exit 1
+          }
+
+          $certificateSha1 = ($rawSha1 -replace "[^a-fA-F0-9]", "").ToUpperInvariant()
+          if ($certificateSha1.Length -ne 40) {
+            Write-Host "ERROR: CERTUM_CERTIFICATE_SHA1 is invalid after normalization"
+            Write-Host "Raw length: $($rawSha1.Length), normalized length: $($certificateSha1.Length)"
+            exit 1
+          }
+
+          Write-Host "Certificate SHA1: $($certificateSha1.Substring(0, 16))... (truncated)"
+
+          Write-Host "Locating signtool..."
+          $signTool = $null
+          $windowsKitsBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+          if (Test-Path $windowsKitsBin) {
+            $signTool = (
+              Get-ChildItem -Path $windowsKitsBin -Recurse -File -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+                Sort-Object -Property @{
+                  Expression = {
+                    if ($_.FullName -match "\\bin\\([^\\]+)\\x64\\signtool\.exe$") {
+                      try { [version]$matches[1] } catch { [version]"0.0" }
+                    } else {
+                      [version]"0.0"
+                    }
+                  }
+                  Descending = $true
+                } |
+                Select-Object -First 1
+            ).FullName
+          }
+
+          if (-not $signTool) {
+            $cmd = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
+            if ($cmd) {
+              $signTool = $cmd.Source
+            }
+          }
+
+          if (-not $signTool) {
             Write-Host "ERROR: signtool.exe not found"
             exit 1
           }
-          
-          Write-Host "Found signtool at: $signtoolPath"
-          
-          # Debug: Show the SHA1 we're looking for
-          $sha1 = $env:CERTUM_CERTIFICATE_SHA1
-          Write-Host "Specified certificate SHA1: [$sha1]"
-          Write-Host "SHA1 length: $($sha1.Length)"
-          
-          # Debug: List all certificates in all stores
-          Write-Host ""
-          Write-Host "=== Certificates in CurrentUser\My ==="
-          Get-ChildItem -Path Cert:\CurrentUser\My | ForEach-Object {
-            Write-Host "  Thumbprint: $($_.Thumbprint) | Subject: $($_.Subject) | HasPrivateKey: $($_.HasPrivateKey)"
+
+          Write-Host "Found signtool: $signTool"
+
+          $preferredStoreArgs = @("/s", "My")
+          $userMatch = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Thumbprint -eq $certificateSha1 } |
+                       Select-Object -First 1
+          if ($userMatch) {
+            Write-Host "Matched code-signing certificate in CurrentUser\\My: $($userMatch.Subject)"
+          } else {
+            $machineMatch = Get-ChildItem -Path Cert:\LocalMachine\My -CodeSigningCert -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Thumbprint -eq $certificateSha1 } |
+                            Select-Object -First 1
+            if ($machineMatch) {
+              Write-Host "Matched code-signing certificate in LocalMachine\\My: $($machineMatch.Subject)"
+              $preferredStoreArgs = @("/sm", "/s", "My")
+            } else {
+              Write-Host "WARNING: SHA1 not found in CurrentUser\\My or LocalMachine\\My code-signing certs"
+              Write-Host "Will still attempt signing using /sha1 with fallback strategies"
+              Write-Host "Available code-signing certificates:"
+              $availableCerts = @()
+              $availableCerts += Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue | ForEach-Object {
+                "CurrentUser\\My | Thumbprint=$($_.Thumbprint) | Subject=$($_.Subject)"
+              }
+              $availableCerts += Get-ChildItem -Path Cert:\LocalMachine\My -CodeSigningCert -ErrorAction SilentlyContinue | ForEach-Object {
+                "LocalMachine\\My | Thumbprint=$($_.Thumbprint) | Subject=$($_.Subject)"
+              }
+              if ($availableCerts.Count -eq 0) {
+                Write-Host "  (none)"
+              } else {
+                $availableCerts | ForEach-Object { Write-Host "  $_" }
+              }
+              $preferredStoreArgs = @()
+            }
           }
-          Write-Host "=== Certificates in CurrentUser\Root ==="
-          Get-ChildItem -Path Cert:\CurrentUser\Root | Select-Object -First 5 | ForEach-Object {
-            Write-Host "  Thumbprint: $($_.Thumbprint) | Subject: $($_.Subject)"
-          }
-          Write-Host ""
-          
-          $filesToSign = Get-ChildItem -Path "sign_binaries/windows" -Recurse -Include *.exe
-          
-          if ($filesToSign.Count -eq 0) {
-            Write-Host "No exe files found to sign"
+
+          Write-Host "Scanning for Windows binaries to sign..."
+          $filesToSign = Get-ChildItem -Path $targetDirectory -Recurse -File | Where-Object { $_.Extension -ieq ".exe" }
+
+          if (($null -eq $filesToSign) -or ($filesToSign.Count -eq 0)) {
+            Write-Host "WARNING: No .exe files found to sign"
             exit 0
           }
-          
+
           Write-Host "Found $($filesToSign.Count) files to sign"
-          
+          $signedCount = 0
+          $failedCount = 0
+
           foreach ($file in $filesToSign) {
-            Write-Host "Signing: $($file.FullName)"
-            $timestampServer = "http://timestamp.digicert.com"
-            
-            if ($sha1) {
-              & $signtoolPath sign /fd SHA256 /tr $timestampServer /td SHA256 /sha1 $sha1 "$($file.FullName)"
-            } else {
-              & $signtoolPath sign /fd SHA256 /tr $timestampServer /td SHA256 /a "$($file.FullName)"
+            Write-Host "=== Signing: $($file.Name) ==="
+            Write-Host "Path: $($file.FullName)"
+
+            $attempts = @(
+              @{ Name = "SHA1 + /td"; Args = @("sign", "/sha1", $certificateSha1) + $preferredStoreArgs + @("/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
+              @{ Name = "SHA1 (without /td)"; Args = @("sign", "/sha1", $certificateSha1) + $preferredStoreArgs + @("/tr", $timestampServer, "/fd", "SHA256", "/v", $file.FullName) },
+              @{ Name = "SHA1 without store hint"; Args = @("sign", "/sha1", $certificateSha1, "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
+              @{ Name = "Auto cert selection (/a)"; Args = @("sign", "/a", "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) }
+            )
+
+            $signed = $false
+            foreach ($attempt in $attempts) {
+              Write-Host "Attempt: $($attempt.Name)"
+              $signOutput = & $signTool @($attempt.Args) 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "SUCCESS: $($attempt.Name)"
+                $signed = $true
+                break
+              }
+
+              Write-Host "FAILED: $($attempt.Name)"
+              Write-Host "$signOutput"
             }
-            
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "  WARNING: signtool returned exit code $LASTEXITCODE"
+
+            if ($signed) {
+              $signedCount++
+              $verifyOutput = & $signTool verify /pa /v $file.FullName 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "VERIFIED: Signature verification successful"
+              } else {
+                Write-Host "WARNING: Signature verification failed"
+                Write-Host "$verifyOutput"
+              }
             } else {
-              Write-Host "  OK: Signed successfully"
+              $failedCount++
             }
+
+            Write-Host ""
           }
-          
-          Write-Host "=== WINDOWS SIGNING COMPLETE ==="
+
+          Write-Host "=== SIGNING SUMMARY ==="
+          Write-Host "Total files: $($filesToSign.Count)"
+          Write-Host "Successfully signed: $signedCount"
+          Write-Host "Failed to sign: $failedCount"
+
+          if ($failedCount -eq 0) {
+            Write-Host "ALL WINDOWS BINARIES SIGNED SUCCESSFULLY"
+            $global:LASTEXITCODE = 0
+            exit 0
+          }
+
+          Write-Host "SOME WINDOWS BINARIES FAILED TO SIGN"
+          $global:LASTEXITCODE = 1
+          exit 1
         continue-on-error: true
 
       # - name: Sign Android APK (jarsigner + PKCS#11)
@@ -406,7 +508,7 @@ jobs:
     if: always()
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Determine version
         id: version
