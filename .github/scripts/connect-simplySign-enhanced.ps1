@@ -166,7 +166,7 @@ function Get-TotpCode {
 
 # Generate current TOTP code
 $otp = Get-TotpCode -Secret $Base32 -Digits $Digits -Period $Period -Algorithm $Algorithm
-Write-Host "Generated TOTP: $otp (using $Algorithm algorithm)"
+Write-Host "Generated TOTP code successfully (masked) using $Algorithm algorithm"
 Write-Host ""
 
 # Launch SimplySign Desktop (registry should auto-open login dialog)
@@ -297,7 +297,7 @@ if ($normalizedExpectedSha1) {
         exit 1
     }
 
-    Write-Host "Validating certificate availability for thumbprint: $($normalizedExpectedSha1.Substring(0, 16))... (truncated)"
+    Write-Host "Validating certificate availability for expected signing certificate"
     $ready = $false
     $withPrivateKey = $false
 

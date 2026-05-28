@@ -53,16 +53,14 @@ function Find-TargetCertificate {
 
 function Show-PrivateKeyCertificateHints {
     $candidates = Get-ChildItem -Path "Cert:\CurrentUser\My", "Cert:\LocalMachine\My" -ErrorAction SilentlyContinue |
-        Where-Object { $_.HasPrivateKey } |
-        Select-Object -First 10 Subject, Issuer, Thumbprint, HasPrivateKey, NotAfter
+        Where-Object { $_.HasPrivateKey }
 
     if (($null -eq $candidates) -or ($candidates.Count -eq 0)) {
         Write-Host "No certificates with private keys were found in Personal stores"
         return
     }
 
-    Write-Host "Available certificates with private keys (first 10):"
-    $candidates | Format-Table -AutoSize
+    Write-Host "Certificates with private keys are present in Personal stores, but details are hidden for security"
 }
 
 Write-Host "=== WINDOWS BINARY SIGNING (CERTUM SIMPLYSIGN) ==="
@@ -85,7 +83,7 @@ if ($normalizedSha1.Length -ne 40) {
     exit 1
 }
 
-Write-Host "Certificate SHA1: $($normalizedSha1.Substring(0, 16))... (truncated)"
+Write-Host "Expected signing certificate thumbprint has been received (masked)"
 
 $targetCerts = Find-TargetCertificate -Thumbprint $normalizedSha1
 if (($null -eq $targetCerts) -or ($targetCerts.Count -eq 0)) {
@@ -145,7 +143,7 @@ foreach ($file in $filesToSign) {
         }
 
         Write-Host "FAILED: $($attempt.Name)"
-        Write-Host "$signOutput"
+        Write-Host "signtool returned a non-zero exit code; detailed output is hidden for security"
     }
 
     if ($signed) {
@@ -155,7 +153,7 @@ foreach ($file in $filesToSign) {
             Write-Host "VERIFIED: Signature verification successful"
         } else {
             Write-Host "WARNING: Signature verification failed"
-            Write-Host "$verifyOutput"
+            Write-Host "Detailed verification output is hidden for security"
         }
     } else {
         $failedCount++
