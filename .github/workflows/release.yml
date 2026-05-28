@@ -312,39 +312,7 @@ jobs:
           }
 
           Write-Host "Found signtool: $signTool"
-
-          $preferredStoreArgs = @("/s", "My")
-          $userMatch = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Thumbprint -eq $certificateSha1 } |
-                       Select-Object -First 1
-          if ($userMatch) {
-            Write-Host "Matched code-signing certificate in CurrentUser\\My: $($userMatch.Subject)"
-          } else {
-            $machineMatch = Get-ChildItem -Path Cert:\LocalMachine\My -CodeSigningCert -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Thumbprint -eq $certificateSha1 } |
-                            Select-Object -First 1
-            if ($machineMatch) {
-              Write-Host "Matched code-signing certificate in LocalMachine\\My: $($machineMatch.Subject)"
-              $preferredStoreArgs = @("/sm", "/s", "My")
-            } else {
-              Write-Host "WARNING: SHA1 not found in CurrentUser\\My or LocalMachine\\My code-signing certs"
-              Write-Host "Will still attempt signing using /sha1 with fallback strategies"
-              Write-Host "Available code-signing certificates:"
-              $availableCerts = @()
-              $availableCerts += Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue | ForEach-Object {
-                "CurrentUser\\My | Thumbprint=$($_.Thumbprint) | Subject=$($_.Subject)"
-              }
-              $availableCerts += Get-ChildItem -Path Cert:\LocalMachine\My -CodeSigningCert -ErrorAction SilentlyContinue | ForEach-Object {
-                "LocalMachine\\My | Thumbprint=$($_.Thumbprint) | Subject=$($_.Subject)"
-              }
-              if ($availableCerts.Count -eq 0) {
-                Write-Host "  (none)"
-              } else {
-                $availableCerts | ForEach-Object { Write-Host "  $_" }
-              }
-              $preferredStoreArgs = @()
-            }
-          }
+          Write-Host "Using direct SHA1 signing mode from CERTUM_CERTIFICATE_SHA1"
 
           Write-Host "Scanning for Windows binaries to sign..."
           $filesToSign = Get-ChildItem -Path $targetDirectory -Recurse -File | Where-Object { $_.Extension -ieq ".exe" }
@@ -363,10 +331,10 @@ jobs:
             Write-Host "Path: $($file.FullName)"
 
             $attempts = @(
-              @{ Name = "SHA1 + /td"; Args = @("sign", "/sha1", $certificateSha1) + $preferredStoreArgs + @("/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
-              @{ Name = "SHA1 (without /td)"; Args = @("sign", "/sha1", $certificateSha1) + $preferredStoreArgs + @("/tr", $timestampServer, "/fd", "SHA256", "/v", $file.FullName) },
-              @{ Name = "SHA1 without store hint"; Args = @("sign", "/sha1", $certificateSha1, "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
-              @{ Name = "Auto cert selection (/a)"; Args = @("sign", "/a", "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) }
+              @{ Name = "Direct SHA1 + /td"; Args = @("sign", "/sha1", $certificateSha1, "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
+              @{ Name = "Direct SHA1 (without /td)"; Args = @("sign", "/sha1", $certificateSha1, "/tr", $timestampServer, "/fd", "SHA256", "/v", $file.FullName) },
+              @{ Name = "Direct SHA1 in CurrentUser\\My"; Args = @("sign", "/sha1", $certificateSha1, "/s", "My", "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) },
+              @{ Name = "Direct SHA1 in LocalMachine\\My"; Args = @("sign", "/sha1", $certificateSha1, "/sm", "/s", "My", "/tr", $timestampServer, "/td", "SHA256", "/fd", "SHA256", "/v", $file.FullName) }
             )
 
             $signed = $false
