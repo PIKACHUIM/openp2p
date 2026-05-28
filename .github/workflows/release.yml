@@ -190,62 +190,33 @@ jobs:
           ./.github/scripts/connect-simplySign-enhanced.ps1
         continue-on-error: true
 
-      - name: Wait for certificate registration
+      - name: Wait for SimplySign readiness
         shell: pwsh
         run: |
-          Write-Host "Waiting for SimplySign to register certificate..."
+          Write-Host "Waiting for SimplySign Desktop process..."
           $maxWait = 30
-          $found = $false
+          $ready = $false
+
           for ($i = 0; $i -lt $maxWait; $i++) {
-            $certs = Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert 2>$null
-            if ($certs.Count -gt 0) {
-              Write-Host "Certificate found after $($i * 2) seconds:"
-              foreach ($cert in $certs) {
-                Write-Host "  Subject: $($cert.Subject)"
-                Write-Host "  Thumbprint: $($cert.Thumbprint)"
-                Write-Host "  NotAfter: $($cert.NotAfter)"
+            $processes = Get-Process -Name "*SimplySign*" -ErrorAction SilentlyContinue
+            if ($processes) {
+              Write-Host "SimplySign process detected after $($i * 2) seconds:"
+              $processes | ForEach-Object {
+                Write-Host "  PID: $($_.Id) | Name: $($_.ProcessName) | Status: $($_.Responding)"
               }
-              $found = $true
+              $ready = $true
               break
             }
             Start-Sleep -Seconds 2
           }
-          if (-not $found) {
-            Write-Host "WARNING: No code signing certificate found in store after $($maxWait * 2) seconds"
-            Write-Host ""
-            Write-Host "=== ALL certificates in CurrentUser\My ==="
-            $allCerts = Get-ChildItem -Path Cert:\CurrentUser\My
-            if ($allCerts.Count -eq 0) {
-              Write-Host "  (EMPTY - no certificates at all)"
-            } else {
-              foreach ($cert in $allCerts) {
-                Write-Host "  Subject: $($cert.Subject)"
-                Write-Host "  Thumbprint: $($cert.Thumbprint)"
-                Write-Host "  HasPrivateKey: $($cert.HasPrivateKey)"
-                Write-Host "  NotAfter: $($cert.NotAfter)"
-                Write-Host "  EnhancedKeyUsage: $($cert.EnhancedKeyUsageList)"
-                Write-Host "  ---"
-              }
-            }
-            Write-Host ""
-            Write-Host "=== ALL certificates in LocalMachine\My ==="
-            $lmCerts = Get-ChildItem -Path Cert:\LocalMachine\My -ErrorAction SilentlyContinue
-            if ($lmCerts.Count -eq 0) {
-              Write-Host "  (EMPTY)"
-            } else {
-              foreach ($cert in $lmCerts) {
-                Write-Host "  Subject: $($cert.Subject)"
-                Write-Host "  Thumbprint: $($cert.Thumbprint)"
-                Write-Host "  HasPrivateKey: $($cert.HasPrivateKey)"
-                Write-Host "  ---"
-              }
-            }
-            Write-Host ""
-            Write-Host "=== SimplySign process status ==="
-            Get-Process -Name "*SimplySign*" -ErrorAction SilentlyContinue | ForEach-Object {
-              Write-Host "  PID: $($_.Id) | Name: $($_.ProcessName) | Status: $($_.Responding)"
-            }
+
+          if (-not $ready) {
+            Write-Host "WARNING: SimplySign process not detected after $($maxWait * 2) seconds"
+            Write-Host "Signing may still fail if cloud session is not fully ready"
           }
+
+          Write-Host "NOTE: Cloud certificates may not be visible in Cert:\CurrentUser\My."
+          Write-Host "Readiness will be validated by signtool using CERTUM_CERTIFICATE_SHA1."
         continue-on-error: true
 
       - name: Sign Windows Executables (signtool)
