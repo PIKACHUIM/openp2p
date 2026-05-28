@@ -180,22 +180,33 @@ jobs:
           powershell -ExecutionPolicy Bypass -File "./.github/scripts/configure-simplysign-registry.ps1"
 
           echo "Certum signing environment ready"
-        continue-on-error: true
 
       - name: Authenticate Certum (Windows)
         shell: bash
         env:
           CERTUM_OTP_URI: ${{ secrets.CERTUM_OTP_URI }}
           CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
+          CERTUM_CERTIFICATE_SHA1: ${{ secrets.CERTUM_CERTIFICATE_SHA1 }}
           CERTUM_EXE_PATH: ${{ secrets.CERTUM_EXE_PATH }}
         run: |
           echo "=== CERTUM AUTHENTICATION ==="
           echo "Authenticating with Certum cloud certificate using TOTP"
 
-          powershell -ExecutionPolicy Bypass -File "./.github/scripts/connect-simplySign-enhanced.ps1"
+          for attempt in 1 2 3; do
+            echo "Authentication attempt ${attempt}/3"
+            if powershell -ExecutionPolicy Bypass -File "./.github/scripts/connect-simplySign-enhanced.ps1"; then
+              echo "Authentication completed"
+              exit 0
+            fi
 
-          echo "Authentication completed"
-        continue-on-error: true
+            if [ "$attempt" -lt 3 ]; then
+              echo "Authentication attempt failed, retrying in 10 seconds..."
+              sleep 10
+            fi
+          done
+
+          echo "ERROR: Certum authentication failed after 3 attempts"
+          exit 1
 
       - name: Verify Certificate and Sign Windows Binaries
         shell: bash
@@ -259,7 +270,6 @@ jobs:
           powershell -ExecutionPolicy Bypass -File "./.github/scripts/sign-openp2p-windows.ps1" -TargetDirectory "sign_binaries/windows"
 
           echo "Windows binary signing completed"
-        continue-on-error: true
 
       # - name: Sign Android APK (jarsigner + PKCS#11)
       #   shell: pwsh
