@@ -244,7 +244,7 @@ jobs:
           echo "Certificate debugging completed - proceeding to signing..."
           echo ""
 
-          powershell -ExecutionPolicy Bypass -File "./.github/scripts/sign-openp2p-windows.ps1" -TargetDirectory "sign_binaries/windows"
+          powershell -ExecutionPolicy Bypass -File "./.github/scripts/sign--windows.ps1" -TargetDirectory "sign_binaries/windows"
 
           echo "Windows binary signing completed"
 
