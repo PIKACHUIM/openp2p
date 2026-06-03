@@ -5,10 +5,18 @@ on:
   #  branches: [master]
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Release version (e.g. v3.25.11)'
-        type: string
+      release_type:
+        description: '发布类型 (beta: 测试版, stable: 正式版)'
+        type: choice
+        options:
+          - beta
+          - stable
+        default: beta
         required: true
+      version:
+        description: '正式版版本号 (e.g. v3.25.11)，beta发布时可留空'
+        type: string
+        required: false
 
 permissions:
   contents: write
@@ -346,8 +354,13 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          RELEASE_TYPE="${{ inputs.release_type }}"
+          if [ "$RELEASE_TYPE" = "stable" ]; then
             VERSION="${{ inputs.version }}"
+            if [ -z "$VERSION" ]; then
+              echo "ERROR: stable release requires a version number"
+              exit 1
+            fi
             IS_BETA="false"
           else
             VERSION="beta"
@@ -355,7 +368,7 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "is_beta=$IS_BETA" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION, Is Beta: $IS_BETA"
+          echo "Version: $VERSION, Is Beta: $IS_BETA, Release Type: $RELEASE_TYPE"
 
       # Try to download signed Windows artifacts first, fall back to unsigned
       - name: Download signed Windows artifacts
