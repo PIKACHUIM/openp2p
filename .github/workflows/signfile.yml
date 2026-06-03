@@ -7,14 +7,17 @@ on:
         description: 'X86 (i386) 二进制文件下载地址'
         type: string
         required: false
+        default: 'https://console.openpxp.com/download/v1/latest/openp2p386-latest.exe'
       url_x64:
         description: 'X64 (amd64) 二进制文件下载地址'
         type: string
         required: false
+        default: 'https://console.openpxp.com/download/v1/latest/openp2p64-latest.exe'
       url_arm:
         description: 'ARM (arm64) 二进制文件下载地址'
         type: string
         required: false
+        default: 'https://console.openpxp.com/download/v1/latest/openp2parm64-latest.exe'
 
 permissions:
   contents: read
